@@ -78,6 +78,14 @@ class HalGPIO {
   bool wasAnyReleased() const;
   unsigned long getHeldTime() const;
   unsigned long getPowerButtonHeldTime() const;
+  // Diagnostics (input trace): bitmasks of committed state and this frame's edges
+  // over the seven BTN_* indices, the two-sample debounce state, and a raw ADC
+  // readback of both button-ladder groups (see InputManager::readButtonAdc).
+  uint8_t currentMask() const;
+  uint8_t pressedMask() const;
+  uint8_t releasedMask() const;
+  bool isDebouncePending() const;
+  void readButtonAdc(int& raw1, int& cls1, int& raw2, int& cls2);
   bool hasTouch() const;
   // Capacitive Home key reported by the touch controller (X4 Pro). The tap
   // event fires on release and excludes a long hold.

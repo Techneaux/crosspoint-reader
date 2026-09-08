@@ -39,7 +39,9 @@
 #include "fontIds.h"
 #include "images/LoadingIcon.h"
 #include "platform/UsbSerialJtagHandoff.h"
+#include "activities/RenderLock.h"
 #include "util/ButtonNavigator.h"
+#include "util/InputTrace.h"
 #include "util/ScreenshotUtil.h"
 
 GfxRenderer renderer(display);
@@ -290,6 +292,7 @@ void enterDeepSleep(bool fromTimeout = false) {
 
   halTiltSensor.deepSleep();
   display.deepSleep();
+  InputTrace::flush();
   Storage.prepareForDeepSleep();
   LOG_DBG("MAIN", "Entering deep sleep");
 
@@ -472,6 +475,7 @@ void setup() {
   }
 
   LOG_DBG("MAIN", "Starting CrossPoint version " CROSSPOINT_VERSION);
+  InputTrace::begin();
 
   // Resolve the single boot-presentation decision. Skipping the splash also
   // skips the panel-clearing pass and the X3 initial-full-sync arming (see
@@ -584,6 +588,8 @@ void loop() {
 
   gpio.setSharedConfirmPowerShortPressEmitsPower(SETTINGS.shortPwrBtn == CrossPointSettings::SHORT_PWRBTN::SLEEP);
   mappedInputManager.update();
+  InputTrace::samplePoll(gpio);
+  if (InputTrace::nearlyFull() && !RenderLock::peek()) InputTrace::flush();
 
   if (activityManager.requiresExclusiveStorageLoop()) {
     // USB Drive handed the raw SD card to the host. Do not run screenshots,
@@ -630,6 +636,14 @@ void loop() {
         uint8_t* buf = display.getFrameBuffer();
         logSerial.write(buf, bufferSize);
         logSerial.printf("SCREENSHOT_END\n");
+      } else if (cmd == "TRACE") {
+        InputTrace::flush();
+        logSerial.printf("TRACE_START\n");
+        Storage.readFileToStream(InputTrace::logPath(), logSerial, 512);
+        logSerial.printf("\nTRACE_END\n");
+      } else if (cmd == "TRACECLEAR") {
+        InputTrace::flush();
+        logSerial.printf("TRACE_CLEARED:%d\n", Storage.remove(InputTrace::logPath()) ? 1 : 0);
       }
     }
   }

@@ -31,6 +31,7 @@
 #include "KOReaderSyncActivity.h"
 #include "MappedInputManager.h"
 #include "ProgressMapper.h"
+#include "../../util/InputTrace.h"
 #include "QrDisplayActivity.h"
 #include "ReaderActivity.h"
 #include "ReaderFontSizes.h"
@@ -598,6 +599,7 @@ void EpubReaderActivity::loop() {
     }
     const bool forward = pendingManualTurn > 0;
     pendingManualTurn = 0;
+    InputTrace::record(InputTrace::DEFER_EXEC, 0, forward ? 1 : -1, 0);
     pageTurn(forward);
     requestUpdate();
     return;
@@ -609,6 +611,8 @@ void EpubReaderActivity::loop() {
   if (!prevTriggered && !nextTriggered) {
     return;
   }
+  InputTrace::record(InputTrace::SEEN, static_cast<int32_t>(millis() - lastPageTurnTime), nextTriggered ? 1 : -1,
+                     static_cast<int8_t>(pendingManualTurn));
 
   if (handleEndOfBookPageTurn(prevTriggered, nextTriggered)) {
     return;
@@ -642,6 +646,7 @@ void EpubReaderActivity::loop() {
   }
 
   if (turnGuardActive) {
+    InputTrace::record(InputTrace::DEFER, 0, prevTriggered ? -1 : 1, static_cast<int8_t>(pendingManualTurn));
     pendingManualTurn = prevTriggered ? -1 : 1;
     return;
   }
@@ -1032,6 +1037,7 @@ void EpubReaderActivity::toggleAutoPageTurn(const uint8_t selectedPageTurnOption
 }
 
 bool EpubReaderActivity::pageTurn(bool isForwardTurn) {
+  InputTrace::record(InputTrace::TURN, 0, isForwardTurn ? 1 : -1, static_cast<int8_t>(pendingManualTurn));
   if (!section) return false;
   {
     RenderLock lock;
@@ -1407,6 +1413,7 @@ void EpubReaderActivity::renderBook() {
       lastSavedPageCount = section->estimatedTotalPages();
     }
   }
+  InputTrace::flush();
 
   showPendingSyncSaveError();
 
@@ -1715,6 +1722,8 @@ void EpubReaderActivity::renderContents(std::unique_ptr<Page> page, const int or
               tBwRender - tPrewarm, tDisplay - tBwRender, tEnd - t0);
     }
   }
+  InputTrace::record(InputTrace::RENDER, static_cast<int32_t>(millis() - t0), cleanImageBasePending ? 1 : 0,
+                     static_cast<int8_t>(pendingManualTurn));
 }
 
 void EpubReaderActivity::renderStatusBar() const {

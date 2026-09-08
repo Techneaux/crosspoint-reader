@@ -158,6 +158,41 @@ bool HalGPIO::wasReleased(uint8_t buttonIndex) const { return inputMgr.wasReleas
 
 bool HalGPIO::wasAnyReleased() const { return inputMgr.wasAnyReleased(); }
 
+uint8_t HalGPIO::currentMask() const {
+  uint8_t m = 0;
+  for (uint8_t i = 0; i <= InputManager::BTN_POWER; i++) {
+    if (inputMgr.isPressed(i)) m |= static_cast<uint8_t>(1u << i);
+  }
+  return m;
+}
+
+uint8_t HalGPIO::pressedMask() const {
+  uint8_t m = 0;
+  for (uint8_t i = 0; i <= InputManager::BTN_POWER; i++) {
+    if (inputMgr.wasPressed(i)) m |= static_cast<uint8_t>(1u << i);
+  }
+  return m;
+}
+
+uint8_t HalGPIO::releasedMask() const {
+  uint8_t m = 0;
+  for (uint8_t i = 0; i <= InputManager::BTN_POWER; i++) {
+    if (inputMgr.wasReleased(i)) m |= static_cast<uint8_t>(1u << i);
+  }
+  return m;
+}
+
+bool HalGPIO::isDebouncePending() const { return inputMgr.isDebouncePending(); }
+
+void HalGPIO::readButtonAdc(int& raw1, int& cls1, int& raw2, int& cls2) {
+  InputManager::ButtonAdcSample g1{}, g2{};
+  inputMgr.readButtonAdc(g1, g2);
+  raw1 = g1.raw;
+  cls1 = g1.button;
+  raw2 = g2.raw;
+  cls2 = g2.button;
+}
+
 unsigned long HalGPIO::getHeldTime() const { return inputMgr.getHeldTime(); }
 
 unsigned long HalGPIO::getPowerButtonHeldTime() const { return inputMgr.getPowerButtonHeldTime(); }
