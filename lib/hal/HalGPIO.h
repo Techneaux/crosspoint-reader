@@ -90,6 +90,10 @@ class HalGPIO {
   // Last BQ27220 Current() reading taken by isUsbConnected() (signed mA, negative =
   // discharging); INT16_MIN if the X3 gauge has not been read successfully yet.
   int16_t lastGaugeCurrentMa() const { return lastGaugeMa; }
+  // True when any button contact is closed right now, read straight from the
+  // hardware (ADC ladder off its idle rail, or the power GPIO asserted), without
+  // going through the debounced state. Cheap enough to call every few ms.
+  bool rawInputActive();
   bool hasTouch() const;
   // Capacitive Home key reported by the touch controller (X4 Pro). The tap
   // event fires on release and excludes a long hold.
