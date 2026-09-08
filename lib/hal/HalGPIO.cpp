@@ -273,6 +273,7 @@ bool HalGPIO::isUsbConnected() const {
     for (uint8_t attempt = 0; attempt < 2; ++attempt) {
       int16_t currentMa = 0;
       if (X3GPIO::readBQ27220CurrentMA(&currentMa)) {
+        lastGaugeMa = currentMa;
         return currentMa > 0;
       }
       delay(2);

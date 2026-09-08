@@ -45,6 +45,7 @@ class HalGPIO {
 
   bool lastUsbConnected = false;
   bool usbStateChanged = false;
+  mutable int16_t lastGaugeMa = INT16_MIN;
 
  public:
   enum class DeviceType : uint8_t { X4, X3 };
@@ -86,6 +87,9 @@ class HalGPIO {
   uint8_t releasedMask() const;
   bool isDebouncePending() const;
   void readButtonAdc(int& raw1, int& cls1, int& raw2, int& cls2);
+  // Last BQ27220 Current() reading taken by isUsbConnected() (signed mA, negative =
+  // discharging); INT16_MIN if the X3 gauge has not been read successfully yet.
+  int16_t lastGaugeCurrentMa() const { return lastGaugeMa; }
   bool hasTouch() const;
   // Capacitive Home key reported by the touch controller (X4 Pro). The tap
   // event fires on release and excludes a long hold.

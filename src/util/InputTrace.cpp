@@ -46,6 +46,8 @@ volatile size_t tail = 0;  // next read
 volatile size_t dropped = 0;
 portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
 unsigned long lastPollMs = 0;
+unsigned long lastPowerMs = 0;
+constexpr unsigned long POWER_PERIOD_MS = 10000;
 bool contactActive = false;
 unsigned long lastContactMs = 0;
 constexpr int CONTACT_RAW_MAX = 4000;  // X3 idle rail reads ~4095; every real button band is < 3900
@@ -64,6 +66,7 @@ const char* tagName(uint8_t t) {
     case SLOWPOLL: return "SLOWPOLL";
     case FLUSH: return "FLUSH";
     case CONTACT: return "CONTACT";
+    case POWER: return "POWER";
     default: return "?";
   }
 }
@@ -129,6 +132,16 @@ void samplePoll(HalGPIO& gpio) {
   const uint8_t released = gpio.releasedMask();
   const bool pending = gpio.isDebouncePending();
 
+  if (now - lastPowerMs >= POWER_PERIOD_MS) {
+    lastPowerMs = now;
+    const int16_t ma = gpio.lastGaugeCurrentMa();
+    if (ma != INT16_MIN) {
+      Record pw = blank(POWER);
+      pw.aux = ma;
+      pw.cur = gpio.currentMask();
+      push(pw);
+    }
+  }
   if (dt > SLOWPOLL_MS) {
     Record r = blank(SLOWPOLL);
     r.dt = dt > 0xFFFF ? 0xFFFF : static_cast<uint16_t>(dt);

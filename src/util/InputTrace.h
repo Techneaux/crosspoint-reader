@@ -32,6 +32,7 @@ enum Tag : uint8_t {
   SLOWPOLL,    // gap between two input polls exceeded the threshold; aux = ms
   FLUSH,       // ring flushed to SD; aux = records written
   CONTACT,     // raw ADC off the idle rail with no committed/pending button: partial or light touch
+  POWER,       // every 10 s: aux = gauge current in mA (negative = discharging); flags bit2 = CPU low-power
 };
 
 #if CROSSPOINT_INPUT_TRACE
