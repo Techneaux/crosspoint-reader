@@ -598,6 +598,7 @@ void EpubReaderActivity::loop() {
     }
     const bool forward = pendingManualTurn > 0;
     pendingManualTurn = 0;
+    LOG_DBG("TURN", "deferred turn executed fwd=%d", forward ? 1 : 0);  // TEMP
     pageTurn(forward);
     requestUpdate();
     return;
@@ -609,8 +610,12 @@ void EpubReaderActivity::loop() {
   if (!prevTriggered && !nextTriggered) {
     return;
   }
+  LOG_DBG("TURN", "press prev=%d next=%d tilt=%d lock=%d sinceLast=%lu pending=%d", prevTriggered ? 1 : 0,
+          nextTriggered ? 1 : 0, fromTilt ? 1 : 0, RenderLock::peek() ? 1 : 0, millis() - lastPageTurnTime,
+          pendingManualTurn);  // TEMP
 
   if (handleEndOfBookPageTurn(prevTriggered, nextTriggered)) {
+    LOG_DBG("TURN", "consumed by end-of-book handler");  // TEMP
     return;
   }
 
@@ -643,6 +648,7 @@ void EpubReaderActivity::loop() {
 
   if (turnGuardActive) {
     pendingManualTurn = prevTriggered ? -1 : 1;
+    LOG_DBG("TURN", "deferred (guard active)");  // TEMP
     return;
   }
 
