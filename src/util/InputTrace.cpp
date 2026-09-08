@@ -46,6 +46,9 @@ volatile size_t tail = 0;  // next read
 volatile size_t dropped = 0;
 portMUX_TYPE mux = portMUX_INITIALIZER_UNLOCKED;
 unsigned long lastPollMs = 0;
+bool contactActive = false;
+unsigned long lastContactMs = 0;
+constexpr int CONTACT_RAW_MAX = 4000;  // X3 idle rail reads ~4095; every real button band is < 3900
 
 const char* tagName(uint8_t t) {
   switch (t) {
@@ -60,6 +63,7 @@ const char* tagName(uint8_t t) {
     case RENDER: return "RENDER";
     case SLOWPOLL: return "SLOWPOLL";
     case FLUSH: return "FLUSH";
+    case CONTACT: return "CONTACT";
     default: return "?";
   }
 }
@@ -132,7 +136,33 @@ void samplePoll(HalGPIO& gpio) {
     r.cur = gpio.currentMask();
     push(r);
   }
-  if (!pressed && !released && !pending) return;
+  // Raw readback on every poll (two analogReads, well under 1 ms). A light or
+  // partial touch shows up as a reading off the idle rail (~4095 on the X3) that
+  // never reaches a button band, which the firmware itself cannot see.
+  int raw1, cls1, raw2, cls2;
+  gpio.readButtonAdc(raw1, cls1, raw2, cls2);
+  const bool offRail = (raw1 >= 0 && raw1 < CONTACT_RAW_MAX) || (raw2 >= 0 && raw2 < CONTACT_RAW_MAX);
+  if (!pressed && !released && !pending) {
+    if (offRail && gpio.currentMask() == 0) {
+      // Edge-triggered plus a slow heartbeat while the partial contact persists.
+      if (!contactActive || now - lastContactMs > 250) {
+        Record c = blank(CONTACT);
+        c.dt = dt > 0xFFFF ? 0xFFFF : static_cast<uint16_t>(dt);
+        c.adc1 = static_cast<int16_t>(raw1);
+        c.adc2 = static_cast<int16_t>(raw2);
+        c.cls1 = static_cast<int8_t>(cls1);
+        c.cls2 = static_cast<int8_t>(cls2);
+        c.sub = contactActive ? 1 : 0;  // 0 = onset, 1 = still held
+        push(c);
+        lastContactMs = now;
+      }
+      contactActive = true;
+    } else {
+      contactActive = false;
+    }
+    return;
+  }
+  contactActive = false;
 
   Record r = blank(pressed ? PRESS : (released ? RELEASE : PENDING));
   r.dt = dt > 0xFFFF ? 0xFFFF : static_cast<uint16_t>(dt);
@@ -140,8 +170,6 @@ void samplePoll(HalGPIO& gpio) {
   r.pressed = pressed;
   r.released = released;
   if (pending) r.flags |= 0x01;
-  int raw1, cls1, raw2, cls2;
-  gpio.readButtonAdc(raw1, cls1, raw2, cls2);
   r.adc1 = static_cast<int16_t>(raw1);
   r.adc2 = static_cast<int16_t>(raw2);
   r.cls1 = static_cast<int8_t>(cls1);
