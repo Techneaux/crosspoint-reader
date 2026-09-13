@@ -73,8 +73,17 @@ class UiListActivity : public Activity, protected UiAppHost {
   // hardware the denser override below uses the theme's *-with-subtitle row
   // height instead of its single-line one (see syncListViewport()).
   void syncListViewport(UiScreen& screen, freeink::ui::ListProps& props, bool hasSubtitle = false);
-  // Move the selection to index and pull the viewport to it.
-  void moveSelectionTo(int index);
+  // Step the selection by delta rows (a tap), wrapping like
+  // ButtonNavigator::nextIndex, and pull the viewport to it. Never blocks: the
+  // render task reads nav mid-build, so the step is applied under the render
+  // lock only when the lock is free; otherwise it is counted and applied, with
+  // any other queued steps and a single repaint, on the first loop pass after
+  // the render. The main loop is the only button sampler, and waiting here for
+  // an e-ink refresh would drop every tap that starts and ends inside it.
+  void stepSelection(int delta);
+  // Jump a page (a hold). Holds repeat every 500 ms, so one landing during a
+  // render is skipped rather than queued.
+  void pageSelection(int direction);
 
   // --- shared state ----------------------------------------------------------
   // Selection + viewport (selected/top/visibleRows/followOnBuild). Access via
@@ -85,9 +94,24 @@ class UiListActivity : public Activity, protected UiAppHost {
  private:
   static void screenTrampoline(UiScreen& screen, void* user);
   static void rowActionTrampoline(const freeink::ui::ActionEvent& event, void* user);
+  // Apply the queued steps under the render lock and request a repaint.
+  // wait=false leaves them queued while a render is in flight; wait=true
+  // blocks — used before an action release so handlers (including subclass
+  // ones reading nav.selected) act on the row the user reached.
+  void flushPendingSelection(bool wait);
+  // True when this input frame carries the release that list handlers act on:
+  // Confirm, Back, Power, or a screen touch (row taps route on release).
+  // Releases only: blocking on a press would stall until the render ends and
+  // inflate getHeldTime(), turning a short Confirm into a long press.
+  bool hasActionRelease() const;
   // Named apart from UiAppHost::routeTouch so the host overload stays visible
   // (not name-hidden) to subclasses with extra touch surfaces.
   bool routeListTouch();
 
   const bool wantsTouchLongPress;
+  // Row steps not yet applied because the render task held the lock. Bounded:
+  // holds are handled by continuous navigation, so a deeper queue only means
+  // the user out-tapped a very slow render.
+  static constexpr int MAX_PENDING_STEPS = 16;
+  int8_t pendingSteps = 0;
 };
