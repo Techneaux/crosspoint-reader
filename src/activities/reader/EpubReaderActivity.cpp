@@ -251,7 +251,7 @@ int EpubReaderActivity::bookPercentFor(const ChapterPosition& position) const {
 }
 
 void EpubReaderActivity::openReaderMenu() {
-  pendingManualTurn = 0;
+  pendingManualTurns = 0;
   if (usesToolbarMenu()) {
     // Reached from a child activity's result handler (footnotes, bookmarks,
     // go-to-percent... cancelled back to the menu), so the framebuffer holds
@@ -461,14 +461,18 @@ void EpubReaderActivity::loop() {
     }
 
     if (RenderLock::peek()) {
+      // Render in flight: hold the timer. No return — a manual tap sampled in
+      // this frame must still reach the queue below (the guard is active).
       lastPageTurnTime = millis();
-      return;
-    }
-
-    if ((millis() - lastPageTurnTime) >= pageTurnDuration) {
-      pageTurn(true);
-      requestUpdate();
-      return;
+    } else if ((millis() - lastPageTurnTime) >= pageTurnDuration) {
+      if (pageTurn(true)) {
+        requestUpdate();
+        // The end screen must render before its menu takes input. Otherwise
+        // fall through: a manual edge sampled in this frame is queued behind
+        // the turn just made (the post-turn gap arms the guard).
+        if (isAtEndOfBook()) return;
+      }
+      // Lock busy: retry next pass; the manual edge falls through likewise.
     }
   }
 
@@ -534,6 +538,7 @@ void EpubReaderActivity::loop() {
         return;
       case CrossPointSettings::LP_MENU_READER_MENU:
         if (usesToolbarMenu() && section) {
+          pendingManualTurns = 0;
           openOverlay(Overlay::Toolbar);
         } else {
           openReaderMenu();
@@ -563,7 +568,7 @@ void EpubReaderActivity::loop() {
     // Toolbar style: the page is on screen and in the framebuffer, so paint the
     // toolbar over it (one refresh) instead of pushing a full-screen menu.
     if (usesToolbarMenu() && section) {
-      pendingManualTurn = 0;
+      pendingManualTurns = 0;
       openOverlay(Overlay::Toolbar);
     } else {
       openReaderMenu();
@@ -604,17 +609,57 @@ void EpubReaderActivity::loop() {
   }
 
   constexpr unsigned long kMinManualTurnGapMs = 200;
-  const bool turnGuardActive = RenderLock::peek() || (millis() - lastPageTurnTime) < kMinManualTurnGapMs;
-  if (pendingManualTurn != 0 && !turnGuardActive) {
-    if (!section) {
-      pendingManualTurn = 0;
-      return;
+  bool turnGuardActive = RenderLock::peek() || (millis() - lastPageTurnTime) < kMinManualTurnGapMs;
+  if (pendingManualTurns != 0 && !turnGuardActive) {
+    // Every queued press advances the page before the single repaint, so a
+    // burst of taps jumps straight to its destination instead of rendering
+    // each page. Take the lock before reading section/spine state — the render
+    // task may have won the race since peek() — and hold it for the whole
+    // batch so an in-flight render never sees a half-drained page. Try-lock
+    // only: blocking here would stall the button poll for a render and lose
+    // the very presses being queued; the batch simply waits for the next pass.
+    bool turned = false;
+    {
+      RenderLock lock(0);
+      if (lock.locked()) {
+        if (isAtEndOfBook()) {
+          pendingManualTurns = 0;  // the end-of-book menu owns the buttons now
+        } else if (!section) {
+          // Unreachable during a normal chapter rebuild: the crossing went
+          // through pageTurnLocked(), which stamps lastPageTurnTime, so the
+          // 200 ms gap keeps the guard active until the render task holds the
+          // mutex and peek() takes over. Getting here means that render came
+          // and went without a section (build failure). Drop the batch; a
+          // press now falls through to the null-section path below, which
+          // re-requests a render as before.
+          pendingManualTurns = 0;
+        } else {
+          // Stops at a chapter boundary (pageTurnLocked resets the section) and
+          // at the build watermark of a still-building chapter — renderBook()
+          // would clamp an over-advance to the chapter's last page — and the
+          // remainder continues after the next render.
+          while (pendingManualTurns != 0 && section) {
+            const bool forward = pendingManualTurns > 0;
+            if (forward && section->isBuilding() && section->currentPage + 1 >= static_cast<int>(section->pageCount)) {
+              break;
+            }
+            pendingManualTurns += forward ? -1 : 1;
+            const bool applied = pageTurnLocked(forward);
+            turned = turned || applied;  // reaching the end screen is a turn that must render
+            if (!applied || isAtEndOfBook()) {
+              pendingManualTurns = 0;
+              break;
+            }
+          }
+        }
+      }
     }
-    const bool forward = pendingManualTurn > 0;
-    pendingManualTurn = 0;
-    pageTurn(forward);
-    requestUpdate();
-    return;
+    if (turned) requestUpdate();
+    // A render was just requested, or turns are still queued (watermark, lock
+    // busy): a press in this frame must queue behind them rather than take the
+    // immediate path. No early return — the press edge is one-shot and must
+    // reach detectPageTurn().
+    if (turned || pendingManualTurns != 0) turnGuardActive = true;
   }
 
   auto [prevTriggered, nextTriggered, fromTilt] = ReaderUtils::detectPageTurn(mappedInput);
@@ -623,6 +668,16 @@ void EpubReaderActivity::loop() {
   if (!prevTriggered && !nextTriggered) {
     return;
   }
+
+  // The end screen must be on screen before a Next reads as "leave the book"
+  // or a Prev as "back to the last page": while its render is in flight (or
+  // it was reached inside the post-turn gap) a mashed press is ignored. Every
+  // path onto the end sentinel goes through pageTurnLocked(), so the gap
+  // covers request-to-acquire and peek() the render itself; the render
+  // publishes endOfBookOptionsReady before it returns. The only state with
+  // the guard clear and the menu unpublished is an OOM building it, where
+  // falling through (Next -> home) is the right outcome.
+  if (isAtEndOfBook() && turnGuardActive) return;
 
   if (handleEndOfBookPageTurn(prevTriggered, nextTriggered)) {
     return;
@@ -650,25 +705,37 @@ void EpubReaderActivity::loop() {
     return;
   }
 
+  if (turnGuardActive) {
+    // Count the press instead of turning now: renderBook() reads currentPage
+    // throughout, so a turn mid-render tears the page against its status bar.
+    // Checked before the null-section return below: right after a drain
+    // crossed a chapter the section is gone until the render rebuilds it, and
+    // the press must survive that.
+    queueManualTurn(!prevTriggered);
+    return;
+  }
+
   if (!section) {
     requestUpdate();
     return;
   }
 
-  if (turnGuardActive) {
-    pendingManualTurn = prevTriggered ? -1 : 1;
-    return;
-  }
-
-  if (prevTriggered) {
-    pageTurn(false);
-  } else {
-    pageTurn(true);
+  {
+    // Turn now unless the render task took the lock since peek(); then queue
+    // the press rather than block. Only a lost lock is queued: a turn that
+    // cannot move (first page of the book) must not leave a phantom step.
+    RenderLock lock(0);
+    if (!lock.locked()) {
+      queueManualTurn(!prevTriggered);
+      return;
+    }
+    pageTurnLocked(!prevTriggered);
   }
   requestUpdate();
 }
 
 void EpubReaderActivity::jumpToPercent(int percent) {
+  pendingManualTurns = 0;  // presses queued for the old position must not replay here
   if (!epub) return;
   const size_t bookSize = epub->getBookSize();
   if (bookSize == 0) return;
@@ -994,6 +1061,7 @@ void EpubReaderActivity::applyInitialOrientation() {
 }
 
 void EpubReaderActivity::applyOrientation(const uint8_t orientation) {
+  pendingManualTurns = 0;  // presses queued for the old position must not replay here
   // Also runs when SETTINGS already holds the new value but this layout was
   // built for the old one — that is what an external change looks like here.
   if (SETTINGS.orientation == orientation && appliedOrientation == orientation) {
@@ -1040,19 +1108,27 @@ void EpubReaderActivity::toggleAutoPageTurn(const uint8_t selectedPageTurnOption
   }
 }
 
-bool EpubReaderActivity::pageTurn(bool isForwardTurn) {
+bool EpubReaderActivity::pageTurn(const bool isForwardTurn) {
+  // Never blocks: the main loop is the only button sampler, and waiting here
+  // for an in-flight render would drop the presses being queued behind it.
+  RenderLock lock(0);
+  return lock.locked() && pageTurnLocked(isForwardTurn);
+}
+
+void EpubReaderActivity::queueManualTurn(const bool isForward) {
+  pendingManualTurns =
+      static_cast<int8_t>(std::clamp(pendingManualTurns + (isForward ? 1 : -1), -MAX_QUEUED_TURNS, MAX_QUEUED_TURNS));
+}
+
+bool EpubReaderActivity::pageTurnLocked(const bool isForwardTurn) {
   if (!section) return false;
-  {
-    RenderLock lock;
-    clearDeferredReposition();
-  }
+  clearDeferredReposition();
   if (isForwardTurn) {
     if (section->currentPage < section->pageCount - 1 || section->isBuilding()) {
       section->currentPage++;
       lastPageTurnTime = millis();
       return true;
     } else if (currentSpineIndex + 1 < epub->getSpineItemsCount()) {
-      RenderLock lock;
       nextPageNumber = 0;
       currentSpineIndex++;
       section.reset();
@@ -1069,7 +1145,6 @@ bool EpubReaderActivity::pageTurn(bool isForwardTurn) {
       lastPageTurnTime = millis();
       return true;
     } else if (currentSpineIndex > 0) {
-      RenderLock lock;
       nextPageNumber = 0;
       pendingPageJump = std::numeric_limits<uint16_t>::max();
       currentSpineIndex--;
@@ -1082,6 +1157,7 @@ bool EpubReaderActivity::pageTurn(bool isForwardTurn) {
 }
 
 bool EpubReaderActivity::skipPages(int amount) {
+  pendingManualTurns = 0;  // presses queued for the old position must not replay here
   if (!section) return false;
   if (amount > 0) {
     RenderLock lock;
@@ -1107,6 +1183,7 @@ bool EpubReaderActivity::skipPages(int amount) {
 bool EpubReaderActivity::isAtEndOfBook() const { return epub && currentSpineIndex >= epub->getSpineItemsCount(); }
 
 void EpubReaderActivity::onReturnFromEndOfBook() {
+  pendingManualTurns = 0;  // presses queued before the end screen must not move the restored page
   if (epub && epub->getSpineItemsCount() > 0) {
     currentSpineIndex = epub->getSpineItemsCount() - 1;
     nextPageNumber = 0;
@@ -2433,6 +2510,7 @@ void EpubReaderActivity::activateMoreRow(int row) {
 }
 
 void EpubReaderActivity::navigateToHref(const std::string& hrefStr, const bool savePosition) {
+  pendingManualTurns = 0;  // presses queued for the old position must not replay here
   if (!epub) return;
 
   if (savePosition && section && footnoteDepth < MAX_FOOTNOTE_DEPTH) {
@@ -2469,6 +2547,7 @@ void EpubReaderActivity::navigateToHref(const std::string& hrefStr, const bool s
 }
 
 void EpubReaderActivity::restoreSavedPosition() {
+  pendingManualTurns = 0;  // presses queued for the old position must not replay here
   if (footnoteDepth <= 0) return;
   footnoteDepth--;
   const auto& pos = savedPositions[footnoteDepth];

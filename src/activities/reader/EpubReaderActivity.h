@@ -32,7 +32,18 @@ class EpubReaderActivity final : public ReaderActivity {
   std::optional<uint32_t> pendingOffsetJump;
   unsigned long lastPageTurnTime = 0UL;
   unsigned long pageTurnDuration = 0UL;
-  int8_t pendingManualTurn = 0;
+  // Manual turns pressed while a render held the lock (or inside the post-turn
+  // gap): +1 forward / -1 back per press, drained together into one repaint
+  // once the guard clears. Saturates well above what a burst can produce: the
+  // slowest observed page render is ~2.7 s and a human taps at most ~8/s
+  // (~22 presses); the bound only limits runaway from a stuck button.
+  static constexpr int MAX_QUEUED_TURNS = 64;
+  int8_t pendingManualTurns = 0;
+  // pageTurn() body with the render lock already held by the caller (the
+  // drain takes it once for a whole batch).
+  bool pageTurnLocked(bool isForward);
+  // Remember a press for the next drain instead of turning now.
+  void queueManualTurn(bool isForward);
   bool pendingPercentJump = false;
   float pendingSpineProgress = 0.0f;
   bool pendingScreenshot = false;

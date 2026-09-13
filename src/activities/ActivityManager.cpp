@@ -409,6 +409,10 @@ RenderLock::RenderLock([[maybe_unused]] Activity&) {
   isLocked = true;
 }
 
+RenderLock::RenderLock(const TickType_t ticksToWait) {
+  isLocked = xSemaphoreTake(activityManager.renderingMutex, ticksToWait) == pdTRUE;
+}
+
 RenderLock::~RenderLock() {
   if (isLocked) {
     xSemaphoreGive(activityManager.renderingMutex);
