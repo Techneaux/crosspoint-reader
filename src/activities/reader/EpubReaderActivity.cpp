@@ -636,11 +636,9 @@ void EpubReaderActivity::loop() {
     return;
   }
 
-  if (!section) {
-    requestUpdate();
-    return;
-  }
-
+  // No section check: pageTurn() only queues, and applyQueuedTurns() folds the
+  // queue into the page the build seeds when a chapter is still loading. A
+  // press during a chapter load now lands instead of being discarded.
   if (prevTriggered) {
     pageTurn(false);
   } else {
@@ -1012,56 +1010,71 @@ void EpubReaderActivity::toggleAutoPageTurn(const uint8_t selectedPageTurnOption
   }
 }
 
-bool EpubReaderActivity::pageTurn(bool isForwardTurn) {
-  if (!section) return false;
-  // No RenderLock here. This runs on the main task, which is the only button
-  // sampler, and blocking on the render mutex for the length of an e-ink
-  // refresh makes every press that starts and ends inside that window
-  // invisible: InputManager diffs levels, it does not queue edges. The page
-  // index is a plain int that the render task snapshots once per render
-  // (renderBook's pageToRender), so advancing it unlocked can only mean
-  // "render again", never a torn page.
+bool EpubReaderActivity::pageTurn(const bool isForwardTurn) {
+  // Queue the turn; the render task applies it. The main task is the only
+  // button sampler, so it must not block on the render mutex, and it must not
+  // touch Section either: the render task can free and replace that pointer
+  // mid-render, and pageCount / isBuilding() are plain fields a build updates
+  // as it lays pages out. Queueing keeps both out of reach, so a burst is
+  // counted here and spent in one place, under the render task's ownership.
+  const int delta = isForwardTurn ? 1 : -1;
+  int8_t current = pendingTurns.load(std::memory_order_relaxed);
+  int8_t next;
+  do {
+    const int sum = current + delta;
+    next = static_cast<int8_t>(sum > MAX_QUEUED_TURNS    ? MAX_QUEUED_TURNS
+                               : sum < -MAX_QUEUED_TURNS ? -MAX_QUEUED_TURNS
+                                                         : sum);
+  } while (!pendingTurns.compare_exchange_weak(current, next, std::memory_order_relaxed));
+  lastPageTurnTime = millis();
+  return true;
+}
+
+void EpubReaderActivity::applyQueuedTurns(int delta) {
   clearDeferredReposition();
-  if (isForwardTurn) {
-    // Read isBuilding() before pageCount: Section::finalizeBuild() publishes
-    // the final pageCount only after releasing the build, so a false
-    // isBuilding() observed first implies the pageCount read after it is final.
-    // The other order can pair a stale watermark with a finished build and
-    // cross the spine in the middle of a chapter.
-    const bool building = section->isBuilding();
-    const int pageCount = static_cast<int>(section->pageCount);
-    if (building || section->currentPage < pageCount - 1) {
-      section->currentPage++;
-      lastPageTurnTime = millis();
-      return true;
-    } else if (currentSpineIndex + 1 < epub->getSpineItemsCount()) {
-      RenderLock lock;
-      nextPageNumber = 0;
-      currentSpineIndex++;
-      section.reset();
-      lastPageTurnTime = millis();
-      return true;
-    } else {
-      currentSpineIndex = epub->getSpineItemsCount();
-      lastPageTurnTime = millis();
-      return true;
+  while (delta != 0) {
+    if (!section) {
+      // A chapter is still loading, or a turn just above crossed into one.
+      // Fold what is left into the page the build will seed, so presses during
+      // a chapter load land instead of being discarded. An explicit jump
+      // (pendingPageJump / anchor / percent) still wins during seeding.
+      const int target = nextPageNumber + delta;
+      nextPageNumber = target < 0 ? 0 : target;
+      return;
     }
-  } else {
-    if (section->currentPage > 0) {
-      section->currentPage--;
-      lastPageTurnTime = millis();
-      return true;
-    } else if (currentSpineIndex > 0) {
-      RenderLock lock;
-      nextPageNumber = 0;
-      pendingPageJump = std::numeric_limits<uint16_t>::max();
-      currentSpineIndex--;
-      section.reset();
-      lastPageTurnTime = millis();
-      return true;
+    const bool forward = delta > 0;
+    delta += forward ? -1 : 1;
+    if (forward) {
+      if (section->isBuilding() || section->currentPage < static_cast<int>(section->pageCount) - 1) {
+        section->currentPage++;
+      } else if (currentSpineIndex + 1 < epub->getSpineItemsCount()) {
+        nextPageNumber = 0;
+        currentSpineIndex++;
+        section.reset();
+      } else {
+        currentSpineIndex = epub->getSpineItemsCount();
+        return;  // end of the book; the end screen owns the buttons from here
+      }
+    } else {
+      if (section->currentPage > 0) {
+        section->currentPage--;
+      } else if (currentSpineIndex > 0) {
+        // Land on the previous chapter's last page, then let any remaining
+        // turns run from there on the next render.
+        nextPageNumber = 0;
+        pendingPageJump = std::numeric_limits<uint16_t>::max();
+        currentSpineIndex--;
+        section.reset();
+        if (delta != 0) {
+          pendingTurns.fetch_add(static_cast<int8_t>(delta), std::memory_order_relaxed);
+          requestUpdate();
+        }
+        return;
+      } else {
+        return;  // start of the book
+      }
     }
   }
-  return false;
 }
 
 bool EpubReaderActivity::skipPages(int amount) {
@@ -1117,6 +1130,11 @@ void EpubReaderActivity::renderBook() {
     GUI.drawPopup(renderer, tr(STR_INDEX_FAILED));
     automaticPageTurnActive = false;
   };
+
+  // Spend any turns queued by the main task before deciding what to draw.
+  if (const int8_t queued = pendingTurns.exchange(0, std::memory_order_relaxed); queued != 0) {
+    applyQueuedTurns(queued);
+  }
 
   if (currentSpineIndex < 0) currentSpineIndex = 0;
   if (currentSpineIndex > epub->getSpineItemsCount()) currentSpineIndex = epub->getSpineItemsCount();

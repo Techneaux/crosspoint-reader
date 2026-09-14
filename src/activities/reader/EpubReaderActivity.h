@@ -196,6 +196,13 @@ class EpubReaderActivity final : public ReaderActivity {
   void loop() override;
 
   bool pageTurn(bool isForward) override;
+  // Turns pressed but not yet applied. The main task only ever adds to this;
+  // the render task drains it in renderBook(), where it already owns Section.
+  static constexpr int MAX_QUEUED_TURNS = 64;
+  std::atomic<int8_t> pendingTurns{0};
+  // Drains the queue. Render task only: it moves currentPage, resets the
+  // section and steps the spine, all of which the render task owns.
+  void applyQueuedTurns(int delta);
   bool skipPages(int amount) override;
   bool isAtEndOfBook() const override;
   void onReturnFromEndOfBook() override;
