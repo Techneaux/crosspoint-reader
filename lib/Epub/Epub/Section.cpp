@@ -7,6 +7,8 @@
 #include <Memory.h>
 #include <Serialization.h>
 
+#include <atomic>
+
 #include "Epub/css/CssParser.h"
 #include "Page.h"
 #include "hyphenation/Hyphenator.h"
@@ -647,19 +649,29 @@ bool Section::finalizeBuild() {
 
   const bool committed = commitBuildFile(SECTION_FILE_VERSION, 0, 0);
   if (build_->cssParser) build_->cssParser->clear();
-  build_.reset();
+  // Publish the counts BEFORE releasing the build. isBuilding() is just
+  // "build_ is set", and a reader that observes it false must then see a final
+  // pageCount rather than the build's watermark -- EpubReaderActivity::pageTurn
+  // reads them in that order to decide whether it is at the end of a chapter,
+  // and pairing a false isBuilding() with a stale count crosses the spine in
+  // the middle of one. The release fence keeps both the compiler and the other
+  // core from letting build_.reset() overtake the stores above it.
   if (!committed) {
     // commitBuildFile removed filePath before the failed swap, so nothing valid remains.
     partial_ = false;
     partialPageCount_ = 0;
     pageCount = 0;
     builtPageCount_ = 0;
+    std::atomic_thread_fence(std::memory_order_release);
+    build_.reset();
     return false;
   }
   buildComplete_ = true;
   partial_ = false;
   partialPageCount_ = 0;
   pageCount = builtPageCount_;
+  std::atomic_thread_fence(std::memory_order_release);
+  build_.reset();
   return true;
 }
 
