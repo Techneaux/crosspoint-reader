@@ -32,7 +32,6 @@ class EpubReaderActivity final : public ReaderActivity {
   std::optional<uint32_t> pendingOffsetJump;
   unsigned long lastPageTurnTime = 0UL;
   unsigned long pageTurnDuration = 0UL;
-  int8_t pendingManualTurn = 0;
   bool pendingPercentJump = false;
   float pendingSpineProgress = 0.0f;
   bool pendingScreenshot = false;
@@ -161,13 +160,18 @@ class EpubReaderActivity final : public ReaderActivity {
   void loadCachedBookmarks();
   void addBookmark();
   void updateBookmarkFlag();
+  // Bookmark flag for a specific page, so a render uses the page it drew.
+  void updateBookmarkFlag(int pageIndex);
 
   void navigateToHref(const std::string& href, bool savePosition = false);
   void restoreSavedPosition();
 
-  void renderContents(std::unique_ptr<Page> page, int orientedMarginTop, int orientedMarginRight,
+  void renderContents(std::unique_ptr<Page> page, int pageIndex, int orientedMarginTop, int orientedMarginRight,
                       int orientedMarginBottom, int orientedMarginLeft);
-  void renderStatusBar() const;
+  // Draws the status bar for pageIndex, the page this render decided to draw.
+  // Passed explicitly rather than read from section->currentPage: the main task
+  // may advance that mid-render, and the body and the bar must agree.
+  void renderStatusBar(int pageIndex) const;
   void applyOrientation(uint8_t orientation);
   void applyInitialOrientation() override;
   // The orientation the current layout was built for. The control center's
